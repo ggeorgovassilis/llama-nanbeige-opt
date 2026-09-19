@@ -2667,6 +2667,19 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         };
                     }
 
+                    if (arch == LLM_ARCH_NANBEIGE && hparams.n_layer_kv_from_start >= 0) {
+                        // Theory E: pass-2 layers past the protected prefix alias pass-1 KV.
+                        const int32_t n_phys = static_cast<const llama_model_nanbeige &>(*this).n_layer_phys;
+
+                        reuse = [=](uint32_t il) {
+                            if (il >= (uint32_t) hparams.n_layer_kv_from_start) {
+                                return (int32_t) il - n_phys;
+                            }
+
+                            return -1;
+                        };
+                    }
+
                     if (mtp_on_hybrid_qwen || mtp_on_hybrid_nemotron) {
                         filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
                     }
@@ -2749,7 +2762,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 hparams.swa_type,
                                 nullptr,
                                 filter,
-                                nullptr,
+                                reuse,
                                 nullptr);
                     }
                 }

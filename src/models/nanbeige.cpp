@@ -29,6 +29,11 @@ void llama_model_nanbeige::load_arch_hparams(llama_model_loader & ml) {
             }
         }
         hparams.n_layer_all = (uint32_t) ((size_t) n_layer_phys * (size_t) n_loops);
+
+        // Theory E: keep the first 2 pass-2 layers with their own KV (they are
+        // anti/weakly correlated with pass-1); layers 2-21 reuse pass-1 slots.
+        const int n_kv_sep = 2;
+        hparams.n_layer_kv_from_start = n_layer_phys + n_kv_sep;
     }
 
     type = LLM_TYPE_UNKNOWN;
