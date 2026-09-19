@@ -61,3 +61,51 @@ looped architecture and cannot be halved without destroying output quality. The
 baseline 7028 MiB is the honest minimum under the "no cheating" rules.
 
 The KV-sharing code change is experimental and must not be merged.
+
+## Next theories
+
+Two more theories are under consideration. Outlined here; tested on their own
+branches.
+
+### Theory R - verify against the reference implementation
+
+The Ouro article claims final-pass cache reuse works "with little quality loss",
+but Theory B produced gibberish. Either the checkpoint was not trained for shared
+KV (the 44-layer cache is irreducible), or llama.cpp's loop semantics diverge from
+the reference and the anti-correlated layer 0 is a bug, not a property of the
+model.
+
+Hypothesis: the loop is depth unrolling, so pass 1 and pass 2 must use identical
+RoPE positions. If `src/models/nanbeige.cpp` (or the nanbeige path in
+`convert_hf_to_gguf.py`) gives pass 2 different positions, or misplaces `loop_norm`
+/ the residual, then pass-1 and pass-2 K/V are artificially different and sharing
+fails for the wrong reason.
+
+Plan: diff `src/models/nanbeige.cpp` and `convert_hf_to_gguf.py` against the HF /
+transformers Nanbeige 4.2 reference; confirm pass 2 uses pass 1's positions. If a
+divergence exists, a small fix could make the caches near-identical and sharing
+"just works".
+
+### Theory E - selective KV sharing
+
+The probe gave a per-layer safety map rather than a single verdict:
+
+- Layer 0: K cosine ~-0.19 (anti-correlated, keep separate)
+- Layer 1: ~0.70 (borderline)
+- Layers 2-19: ~0.84-0.90 (safe to share)
+- Layers 20-21: ~0.72-0.79 (risky, feed the loop-carried state)
+
+Theory B shared all 22 and failed because layer 0 poisoned pass 1's input, which
+propagated into pass 2. The next test is to share only the safe middle and keep the
+boundary layers with their own pass-2 slots.
+
+Variants:
+
+- Threshold: keep pass-2 physical layers 0-1 separate, share 2-21. Saves ~20
+  layers (~2.0 GiB, KV 4394 -> ~2400 MiB).
+- Bitmask (matches the probe map): keep 0, 1, 20, 21 separate, share 2-19. Saves
+  ~18 layers (~1.8 GiB).
+
+Plumbing is a small extension of the existing `has_kv` / `layer_reuse_cb`
+mechanism. Expected peak VRAM ~5100-5300 MiB. Risk: cosine is diagnostic, not a
+guarantee; corruption compounds through the loop.
