@@ -2667,6 +2667,17 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                         };
                     }
 
+                    if (arch == LLM_ARCH_NANBEIGE && hparams.n_layer_kv_from_start >= 0) {
+                        // pass 2 layers reuse pass 1 cache slots: 44 -> 22 KV layers
+                        reuse = [&](uint32_t il) {
+                            if (il >= (uint32_t) hparams.n_layer_kv_from_start) {
+                                return (int32_t) il - hparams.n_layer_kv_from_start;
+                            }
+
+                            return -1;
+                        };
+                    }
+
                     if (mtp_on_hybrid_qwen || mtp_on_hybrid_nemotron) {
                         filter = [&](uint32_t il) { return il >= hparams.n_layer(); };
                     }
@@ -2749,7 +2760,7 @@ llama_memory_i * llama_model::create_memory(const llama_memory_params & params, 
                                 hparams.swa_type,
                                 nullptr,
                                 filter,
-                                nullptr,
+                                reuse,
                                 nullptr);
                     }
                 }

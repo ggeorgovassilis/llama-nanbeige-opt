@@ -29,6 +29,9 @@ void llama_model_nanbeige::load_arch_hparams(llama_model_loader & ml) {
             }
         }
         hparams.n_layer_all = (uint32_t) ((size_t) n_layer_phys * (size_t) n_loops);
+
+        // only pass 1 owns KV slots; pass 2 reuses them via layer_reuse_cb
+        hparams.n_layer_kv_from_start = n_layer_phys;
     }
 
     type = LLM_TYPE_UNKNOWN;
