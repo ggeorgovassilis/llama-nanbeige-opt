@@ -65,7 +65,8 @@ The KV-sharing code change is experimental and must not be merged.
 ## Follow-up theories (resolved)
 
 Two follow-ups were considered after Theory B failed. Both are now closed; the
-full writeup and the reference diff live on the `theory_r` branch.
+reference diff lives on `theory_r` and the selective-sharing experiment lives on
+`theory_e`.
 
 ### Theory R - verify against the reference implementation (RESOLVED: no divergence)
 
@@ -87,29 +88,41 @@ model that never saw it, which is why it gibberished.
 Conclusion: no divergence, no fix. The 44-slot cache is reference-faithful and
 correct.
 
-### Theory E - selective KV sharing (RESOLVED: rejected by Theory R)
+### Theory E - selective KV sharing (RESOLVED: failed empirically)
 
 The probe suggested sharing only the "safe" middle layers (cosine 0.84-0.90) and
-keeping the boundary layers (0, 1, 20, 21) separate.
+keeping the boundary layers separate. Theory R did not resolve this (it answered a
+different, correctness question), so it was tested directly on branch `theory_e`.
 
-Theory R resolves this without running it: the reference does **not** share KV at
-all, so any sharing - full or selective - is a semantic change the weights were
-never trained for. The per-layer cosine map is diagnostic of how different the two
-passes' representations are, not a licence to share the similar-looking middle.
-Sharing only some layers would still corrupt attention in the unshared regions and
-compound through the loop, for a fraction of Theory B's savings.
+Implementation: pass-2 physical layers 0-1 keep their own KV slots; pass-2 layers
+2-21 alias pass-1 slots (`n_layer_kv_from_start = 24` plus a selective reuse
+callback). KV cache 4394.50 -> 2397 MiB (24 layers), VRAM ~7028 -> ~5030 MiB.
 
-Not worth running: no principled reason to expect it to work where full sharing
-failed.
+Result: FAILED. The short gate ("Convert 3 to binary, shift left by two places,
+convert back to decimal, print the result", answer 12) still emits non-terminating
+gibberish instead of "12". Protecting the two worst layers is not enough: the
+corruption is asymmetric (pass 1 reads pass-2 past keys in the shared slots) and
+compounds across the 20 shared layers and the loop, so even the "similar" middle
+cannot be shared.
+
+Conclusion: selective sharing is refuted by measurement, same as full sharing. The
+0.84-0.90 cosine is a weak prior - attention amplifies small key differences and
+compounds them across the loop. The 44-slot cache is required for this checkpoint.
+
+Note: the reference's own `loop_share_kv` uses read-only semantics (pass 2 reads
+pass 1 KV, no overwrite) and needs `enable_double_loop_split=True`. That is a
+different, trained behaviour, not the overwrite aliasing tested here.
 
 ## Final conclusion
 
-All three theories are closed:
+All four theories are closed:
 
 - **A (weights doubled)**: refuted by measurement (weights already aliased).
-- **B (KV sharing)**: halves VRAM but destroys output; the model was not trained
-  for shared KV.
+- **B (full KV sharing)**: halves VRAM but destroys output; the model was not
+  trained for shared KV.
 - **R (llama.cpp diverges from reference)**: refuted by diff; llama.cpp is correct.
+- **E (selective KV sharing)**: saves ~2 GiB VRAM but still destroys output,
+  measured on the short gate.
 
 The 2x KV cache is an inherent, reference-faithful cost of this checkpoint's
 looped architecture. Under the fixed constraints (`-ngl 99`, `-c 48000`, `q8_0`
