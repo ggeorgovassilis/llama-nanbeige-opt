@@ -1,0 +1,22 @@
+# CUDA build environment for llama.cpp (fork: llama-nanbeige-opt)
+# Scoped to the host GPU: NVIDIA RTX 4060 Laptop (sm_89 / compute capability 8.9).
+# CUDA 12.8.1 is the llama.cpp default and fully supports sm_89; the 595.x driver is forward-compatible.
+ARG CUDA_VERSION=12.8.1
+ARG UBUNTU_VERSION=24.04
+FROM nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
+
+# Build tools. GCC 13 (Ubuntu 24.04 default) is a supported nvcc host compiler for CUDA 12.8.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        ninja-build \
+        git \
+        libssl-dev \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Default host compiler for nvcc (matches the system g++)
+ENV CUDAHOSTCXX=g++
+
+WORKDIR /app
