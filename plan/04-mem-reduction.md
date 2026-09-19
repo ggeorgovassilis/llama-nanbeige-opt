@@ -62,50 +62,57 @@ baseline 7028 MiB is the honest minimum under the "no cheating" rules.
 
 The KV-sharing code change is experimental and must not be merged.
 
-## Next theories
+## Follow-up theories (resolved)
 
-Two more theories are under consideration. Outlined here; tested on their own
-branches.
+Two follow-ups were considered after Theory B failed. Both are now closed; the
+full writeup and the reference diff live on the `theory_r` branch.
 
-### Theory R - verify against the reference implementation
+### Theory R - verify against the reference implementation (RESOLVED: no divergence)
 
-The Ouro article claims final-pass cache reuse works "with little quality loss",
-but Theory B produced gibberish. Either the checkpoint was not trained for shared
-KV (the 44-layer cache is irreducible), or llama.cpp's loop semantics diverge from
-the reference and the anti-correlated layer 0 is a bug, not a property of the
-model.
+Question: does llama.cpp's loop semantics match the HF reference, or is the
+anti-correlated layer 0 a bug that made sharing fail for the wrong reason?
 
-Hypothesis: the loop is depth unrolling, so pass 1 and pass 2 must use identical
-RoPE positions. If `src/models/nanbeige.cpp` (or the nanbeige path in
-`convert_hf_to_gguf.py`) gives pass 2 different positions, or misplaces `loop_norm`
-/ the residual, then pass-1 and pass-2 K/V are artificially different and sharing
-fails for the wrong reason.
+Result: **llama.cpp matches the reference exactly.** The HF modeling code
+(`modeling_nanbeige.py`) uses `_get_loop_cache_layer_idx(layer_idx, loop_idx,
+num_hidden_layers) = layer_idx + loop_idx * num_hidden_layers`, i.e. 44 separate KV
+slots (pass 1 -> 0-21, pass 2 -> 22-43). RoPE positions, the inter-pass norm, the
+final norm, the residual stream, and weight aliasing all match `nanbeige.cpp`.
 
-Plan: diff `src/models/nanbeige.cpp` and `convert_hf_to_gguf.py` against the HF /
-transformers Nanbeige 4.2 reference; confirm pass 2 uses pass 1's positions. If a
-divergence exists, a small fix could make the caches near-identical and sharing
-"just works".
+The reference *has* a `loop_share_kv` feature, but it requires
+`enable_double_loop_split=True` (a separate architecture variant), and both are
+`False` in `Nanbeige4.2-3B`. It is not a free inference-side switch - it must be
+trained with the flag on. Theory B's sharing was exactly this flag enabled on a
+model that never saw it, which is why it gibberished.
 
-### Theory E - selective KV sharing
+Conclusion: no divergence, no fix. The 44-slot cache is reference-faithful and
+correct.
 
-The probe gave a per-layer safety map rather than a single verdict:
+### Theory E - selective KV sharing (RESOLVED: rejected by Theory R)
 
-- Layer 0: K cosine ~-0.19 (anti-correlated, keep separate)
-- Layer 1: ~0.70 (borderline)
-- Layers 2-19: ~0.84-0.90 (safe to share)
-- Layers 20-21: ~0.72-0.79 (risky, feed the loop-carried state)
+The probe suggested sharing only the "safe" middle layers (cosine 0.84-0.90) and
+keeping the boundary layers (0, 1, 20, 21) separate.
 
-Theory B shared all 22 and failed because layer 0 poisoned pass 1's input, which
-propagated into pass 2. The next test is to share only the safe middle and keep the
-boundary layers with their own pass-2 slots.
+Theory R resolves this without running it: the reference does **not** share KV at
+all, so any sharing - full or selective - is a semantic change the weights were
+never trained for. The per-layer cosine map is diagnostic of how different the two
+passes' representations are, not a licence to share the similar-looking middle.
+Sharing only some layers would still corrupt attention in the unshared regions and
+compound through the loop, for a fraction of Theory B's savings.
 
-Variants:
+Not worth running: no principled reason to expect it to work where full sharing
+failed.
 
-- Threshold: keep pass-2 physical layers 0-1 separate, share 2-21. Saves ~20
-  layers (~2.0 GiB, KV 4394 -> ~2400 MiB).
-- Bitmask (matches the probe map): keep 0, 1, 20, 21 separate, share 2-19. Saves
-  ~18 layers (~1.8 GiB).
+## Final conclusion
 
-Plumbing is a small extension of the existing `has_kv` / `layer_reuse_cb`
-mechanism. Expected peak VRAM ~5100-5300 MiB. Risk: cosine is diagnostic, not a
-guarantee; corruption compounds through the loop.
+All three theories are closed:
+
+- **A (weights doubled)**: refuted by measurement (weights already aliased).
+- **B (KV sharing)**: halves VRAM but destroys output; the model was not trained
+  for shared KV.
+- **R (llama.cpp diverges from reference)**: refuted by diff; llama.cpp is correct.
+
+The 2x KV cache is an inherent, reference-faithful cost of this checkpoint's
+looped architecture. Under the fixed constraints (`-ngl 99`, `-c 48000`, `q8_0`
+cache), the baseline **7028 MiB is the honest minimum**. The only honest levers are
+lower cache quant, smaller context, or a checkpoint trained with shared KV - none
+available under the "no cheating" rules.
