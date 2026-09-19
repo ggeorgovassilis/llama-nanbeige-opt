@@ -176,3 +176,74 @@ touch memory again.
   shared-KV loop, plus the config's `num_loops` / `skip_loop_final_norm` fields.
 - A "corrected" sharing scheme may still not match the checkpoint if the model was
   trained with a detail we cannot observe from config alone.
+
+## Findings
+
+Reference located and read. Source:
+`https://huggingface.co/Nanbeige/Nanbeige4.2-3B` (`config.json`,
+`modeling_nanbeige.py`, `configuration_nanbeige.py`).
+
+### Verdict: llama.cpp matches the reference. Theory R is refuted.
+
+The reference does **not** share KV across passes for this checkpoint. It uses
+44 separate cache slots, exactly as llama.cpp does. The 2x KV cache is correct and
+irreducible. The model was trained with 44 distinct KV slots, so Theory B's
+sharing is a semantic change the weights never saw - which is why it gibberished.
+
+### The decisive code
+
+The reference default cache index is:
+
+```python
+def _get_loop_cache_layer_idx(layer_idx, loop_idx, num_hidden_layers, cache_layer_idx=None):
+    if cache_layer_idx is not None:
+        return cache_layer_idx
+    return layer_idx + loop_idx * num_hidden_layers
+```
+
+`modeling_nanbeige.py` calls it with `cache_layer_idx=None` in the default path, so
+physical layer `i` in pass `j` maps to slot `i + j * 22`: pass 1 -> slots 0-21,
+pass 2 -> slots 22-43. That is 44 separate slots, identical to llama.cpp's
+`n_layer_all = 44`.
+
+### Checklist diff (reference vs `src/models/nanbeige.cpp`)
+
+| Aspect | Reference | llama.cpp | Verdict |
+| --- | --- | --- | --- |
+| Loops | `for loop_idx in range(2)` over the same 22-layer `ModuleList` | `for il in 0..43`, `layers[i+22]=layers[i]` | match |
+| KV slots | `layer_idx + loop_idx*22` = 44 separate | 44 slots (`n_layer_all=44`) | match |
+| RoPE positions | `position_ids` computed once, shared by both loops | single `inp_pos` for all 44 layers | match |
+| RoPE style | `rotate_half` split-halves (NeoX) | `LLAMA_ROPE_TYPE_NORM` | match |
+| Inter-pass norm | `self.norm` after each loop (reuses final norm), `skip_loop_final_norm=false` | `loop_norm` with `output_norm` after `il==21` | match |
+| Final norm | applied after pass 2 (last loop norm) | `result_norm` after `il==43` | match |
+| Residual | carried across all 44 layers, no reset | `inpL` carried across all 44 | match |
+| Weights | one 22-layer `ModuleList` iterated twice | `layers[i+22]=layers[i]` alias | match |
+
+No divergence found. Both implement the same plain two-pass loop over 22 shared
+physical layers with 44 distinct KV slots.
+
+### Why "loop_share_kv" exists but does not apply
+
+The reference *has* a KV-sharing feature, but it is a different architecture
+variant, not this checkpoint:
+
+- `loop_share_kv` defaults to `False` and **requires `enable_double_loop_split=True`**
+  (`configuration_nanbeige.py`: "loop_share_kv requires enable_double_loop_split").
+- `enable_double_loop_split` also defaults to `False`.
+- `Nanbeige4.2-3B` config has `num_loops=2`, no `enable_double_loop_split`, no
+  `loop_share_kv`. So the plain two-pass loop (separate KV) is what was trained.
+
+`loop_share_kv` is an experimental loop-split/MHC variant that must be trained
+with the flag on. It is not a free inference-side switch for a model trained
+without it. Enabling it on this checkpoint is exactly what Theory B did, and it
+degrades output for the same reason.
+
+### Conclusion
+
+Theory R is closed: no divergence, no fix to make. The 44-slot KV cache is the
+correct, reference-faithful memory cost of this checkpoint. `04-mem-reduction.md`'s
+conclusion stands: with the fixed constraints, 7028 MiB is the honest minimum.
+
+Remaining honest levers (unchanged): lower cache quant, smaller context, or a
+checkpoint trained with shared KV. None are available under the "no cheating"
+rules.
